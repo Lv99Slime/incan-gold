@@ -3,6 +3,8 @@ import type { ReactNode } from 'react'
 import {
   Award,
   Bug,
+  CircleCheckBig,
+  ClipboardCheck,
   DoorOpen,
   Eye,
   EyeOff,
@@ -15,43 +17,67 @@ import {
   Mountain,
   RotateCcw,
   ShieldAlert,
+  ShieldCheck,
   Sparkles,
   Tent,
   Trophy,
+  Undo2,
+  UserRoundCog,
   Waves,
+  X,
 } from 'lucide-react'
 import './App.css'
 import {
   type Card,
   type Decision,
+  type GameMode,
   type GameState,
   HAZARD_LABELS,
   createGame,
+  newDecisionPhase,
   rankPlayers,
   recordDecision,
+  recordDecisions,
   resolveRevealedTurn,
+  reviseDecisions,
   startNextRound,
   totalScore,
 } from './game'
 
 const STORAGE_KEY = 'incan-gold-hotseat-v1'
+const UNDO_STORAGE_KEY = 'incan-gold-undo-v1'
 
 const defaultNames = ['阿進', '阿寶', 'Mina']
 
 function App() {
   const [game, setGame] = useState<GameState | null>(() => loadGame())
+  const [undoGame, setUndoGame] = useState<GameState | null>(() => loadUndoGame())
   const [visibleScores, setVisibleScores] = useState<Set<string>>(() => new Set())
   const [unlockedPlayerId, setUnlockedPlayerId] = useState<string | null>(null)
+  const [scorePeekPlayerId, setScorePeekPlayerId] = useState<string | null>(null)
+  const [scorePeekRevealed, setScorePeekRevealed] = useState(false)
+  const [showResetConfirm, setShowResetConfirm] = useState(false)
   const [playerCount, setPlayerCount] = useState(game?.players.length ?? 3)
   const [names, setNames] = useState<string[]>(
     game?.players.map((player) => player.name) ?? defaultNames,
   )
+  const [gameMode, setGameMode] = useState<GameMode>(game?.mode ?? 'host')
+  const [hostParticipates, setHostParticipates] = useState(game?.hostParticipates ?? false)
+  const [hostPlayerId, setHostPlayerId] = useState(game?.hostPlayerId ?? 'p1')
 
   useEffect(() => {
     if (game) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(game))
     }
   }, [game])
+
+  useEffect(() => {
+    if (undoGame) {
+      localStorage.setItem(UNDO_STORAGE_KEY, JSON.stringify(undoGame))
+    } else {
+      localStorage.removeItem(UNDO_STORAGE_KEY)
+    }
+  }, [undoGame])
 
   const activePlayer = useMemo(() => {
     if (!game || game.status !== 'playing') return null
@@ -66,38 +92,92 @@ function App() {
     setNames((current) =>
       Array.from({ length: count }, (_, index) => current[index] ?? `玩家 ${index + 1}`),
     )
+    if (Number(hostPlayerId.slice(1)) > count) {
+      setHostPlayerId('p1')
+    }
   }
 
   function startGame() {
     const cleanNames = names.slice(0, playerCount).map((name, index) => name.trim() || `玩家 ${index + 1}`)
     setUnlockedPlayerId(null)
-    setGame(createGame(cleanNames))
+    setUndoGame(null)
+    setGame(
+      createGame(cleanNames, createRandomSeed(), {
+        mode: gameMode,
+        hostParticipates,
+        hostPlayerId: hostParticipates ? hostPlayerId : undefined,
+      }),
+    )
   }
 
   function resetGame() {
     localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem(UNDO_STORAGE_KEY)
     setVisibleScores(new Set())
     setUnlockedPlayerId(null)
+    setScorePeekPlayerId(null)
+    setScorePeekRevealed(false)
+    setShowResetConfirm(false)
+    setUndoGame(null)
     setGame(null)
     setPlayerCount(3)
     setNames(defaultNames)
+    setGameMode('host')
+    setHostParticipates(false)
+    setHostPlayerId('p1')
   }
 
   function choose(decision: Decision) {
     if (!game || !activePlayer || unlockedPlayerId !== activePlayer.id) return
+    setUndoGame(null)
     setVisibleScores(new Set())
     setUnlockedPlayerId(null)
     setGame(recordDecision(game, activePlayer.id, decision))
   }
 
+  function submitHostDecisions(decisions: Record<string, Decision>) {
+    if (!game || game.mode !== 'host') return
+    setUndoGame(null)
+    setGame(recordDecisions(game, decisions))
+  }
+
+  function editHostDecisions() {
+    if (!game) return
+    setGame(reviseDecisions(game))
+  }
+
   function resolveTurn() {
     if (!game) return
+    if (game.mode === 'host') setUndoGame(game)
     setGame(resolveRevealedTurn(game))
   }
 
   function nextRound() {
     if (!game) return
+    setUndoGame(null)
     setGame(startNextRound(game))
+  }
+
+  function confirmDrawnCard() {
+    if (!game) return
+    setUndoGame(null)
+    setVisibleScores(new Set())
+    setUnlockedPlayerId(null)
+    setGame(newDecisionPhase(game))
+  }
+
+  function undoSettlement() {
+    if (!undoGame) return
+    setGame(undoGame)
+    setUndoGame(null)
+    setVisibleScores(new Set())
+    setUnlockedPlayerId(null)
+  }
+
+  function requestScorePeek(playerId: string) {
+    if (game?.mode !== 'host' || game.status !== 'playing') return
+    setScorePeekPlayerId(playerId)
+    setScorePeekRevealed(false)
   }
 
   function toggleScore(playerId: string) {
@@ -126,10 +206,70 @@ function App() {
         <HeroPanel />
         <section className="setup-panel">
           <div className="panel-heading">
-            <span className="eyebrow">Hot-seat local play</span>
+            <span className="eyebrow">Choose your table mode</span>
             <h2>設定探險隊</h2>
-            <p>3 至 8 人，同一個畫面逐位秘密決定：繼續入神廟，定係即刻返營。</p>
+            <p>一部裝置就玩得。可以由主持人帶住全場，亦可以沿用逐位秘密交機。</p>
           </div>
+
+          <div className="mode-selector" aria-label="遊戲模式">
+            <button
+              type="button"
+              className={`mode-option${gameMode === 'host' ? ' selected' : ''}`}
+              onClick={() => setGameMode('host')}
+              aria-pressed={gameMode === 'host'}
+            >
+              <UserRoundCog size={24} />
+              <span>
+                <strong>遊戲主持人</strong>
+                <small>一人控制畫面，全體用手勢同步投票</small>
+              </span>
+            </button>
+            <button
+              type="button"
+              className={`mode-option${gameMode === 'hot-seat' ? ' selected' : ''}`}
+              onClick={() => setGameMode('hot-seat')}
+              aria-pressed={gameMode === 'hot-seat'}
+            >
+              <Eye size={24} />
+              <span>
+                <strong>秘密交機</strong>
+                <small>逐位玩家接過裝置，私下作出決定</small>
+              </span>
+            </button>
+          </div>
+
+          {gameMode === 'host' && (
+            <section className="host-setup">
+              <label className="host-toggle">
+                <input
+                  type="checkbox"
+                  checked={hostParticipates}
+                  onChange={(event) => setHostParticipates(event.target.checked)}
+                />
+                <span>
+                  <strong>主持人同時參賽</strong>
+                  <small>主持人每次會先鎖定自己答案，再記錄其他玩家。</small>
+                </span>
+              </label>
+              {hostParticipates && (
+                <label className="field compact">
+                  <span>邊位係主持人？</span>
+                  <select value={hostPlayerId} onChange={(event) => setHostPlayerId(event.target.value)}>
+                    {Array.from({ length: playerCount }, (_, index) => (
+                      <option value={`p${index + 1}`} key={index}>
+                        {names[index]?.trim() || `玩家 ${index + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <div className="gesture-guide">
+                <Footprints size={20} />
+                <span><b>握拳：繼續</b><b>手掌：回營</b></span>
+                <small>主持人倒數 3、2、1，所有玩家同時示意。</small>
+              </div>
+            </section>
+          )}
 
           <label className="field">
             <span>玩家人數</span>
@@ -170,7 +310,8 @@ function App() {
 
   return (
     <main className="app-shell game-shell">
-      {game.round.active &&
+      {game.mode === 'hot-seat' &&
+        game.round.active &&
         game.round.decisionPhase === 'choosing' &&
         activePlayer &&
         unlockedPlayerId !== activePlayer.id && (
@@ -178,21 +319,53 @@ function App() {
             player={activePlayer}
             step={game.round.currentDecisionIndex + 1}
             total={game.round.decisionOrder.length}
+            onReset={() => setShowResetConfirm(true)}
             onReady={() => {
               setVisibleScores(new Set())
               setUnlockedPlayerId(activePlayer.id)
             }}
           />
         )}
+      {scorePeekPlayerId && (
+        <ScorePeekOverlay
+          player={game.players.find((player) => player.id === scorePeekPlayerId) ?? null}
+          revealed={scorePeekRevealed}
+          onReveal={() => setScorePeekRevealed(true)}
+          onClose={() => {
+            setScorePeekPlayerId(null)
+            setScorePeekRevealed(false)
+          }}
+        />
+      )}
+      {showResetConfirm && (
+        <ConfirmResetDialog
+          onCancel={() => setShowResetConfirm(false)}
+          onConfirm={resetGame}
+        />
+      )}
       <header className="top-bar">
         <div>
           <span className="eyebrow">Incan Gold / 印加寶藏 教學遊玩版</span>
-          <h1>神廟桌面</h1>
+          <div className="table-title-row">
+            <h1>神廟桌面</h1>
+            <span className="mode-badge">
+              {game.mode === 'host' ? <UserRoundCog size={15} /> : <Eye size={15} />}
+              {game.mode === 'host' ? '主持人模式' : '秘密交機'}
+            </span>
+          </div>
         </div>
-        <button className="ghost-button" type="button" onClick={resetGame}>
-          <RotateCcw size={18} />
-          新遊戲
-        </button>
+        <div className="top-actions">
+          {game.mode === 'host' && undoGame && (
+            <button className="ghost-button" type="button" onClick={undoSettlement}>
+              <Undo2 size={18} />
+              撤銷結算
+            </button>
+          )}
+          <button className="ghost-button" type="button" onClick={() => setShowResetConfirm(true)}>
+            <RotateCcw size={18} />
+            新遊戲
+          </button>
+        </div>
       </header>
 
       <RoundProgress currentRound={game.round.number} active={game.round.active} />
@@ -200,10 +373,12 @@ function App() {
       <section className="score-strip" aria-label="玩家分數">
         {game.players.map((player, index) => {
           const scoreVisible = visibleScores.has(player.id)
-          const canViewScore =
+          const canViewHotSeatScore =
+            game.mode === 'hot-seat' &&
             game.round.decisionPhase === 'choosing' &&
             activePlayer?.id === player.id &&
             unlockedPlayerId === player.id
+          const canRequestHostScore = game.mode === 'host' && game.status === 'playing'
           return (
           <article className="player-chip" key={player.id} style={{ borderColor: player.color }}>
             <div className="player-marker" title={`玩家 ${index + 1}`}>
@@ -228,20 +403,26 @@ function App() {
             <button
               className="score-visibility-button"
               type="button"
-              onClick={() => toggleScore(player.id)}
-              disabled={!canViewScore}
+              onClick={() =>
+                game.mode === 'host' ? requestScorePeek(player.id) : toggleScore(player.id)
+              }
+              disabled={!canViewHotSeatScore && !canRequestHostScore}
               aria-label={
-                canViewScore
+                canRequestHostScore
+                  ? `私人查看 ${player.name} 的分數`
+                  : canViewHotSeatScore
                   ? `${scoreVisible ? '隱藏' : '顯示'} ${player.name} 的分數`
                   : `${player.name} 的分數已鎖定`
               }
               title={
-                canViewScore
+                canRequestHostScore
+                  ? `將裝置交給 ${player.name} 私人查看`
+                  : canViewHotSeatScore
                   ? `${scoreVisible ? '隱藏' : '顯示'}自己的營地分數`
                   : '只可由目前選擇中的玩家查看'
               }
             >
-              {!canViewScore ? (
+              {!canViewHotSeatScore && !canRequestHostScore ? (
                 <LockKeyhole size={17} />
               ) : scoreVisible ? (
                 <EyeOff size={18} />
@@ -263,9 +444,19 @@ function App() {
           <aside className="control-panel">
             {game.round.active ? (
               game.round.decisionPhase === 'choosing' ? (
-                <DecisionPanel activePlayer={activePlayer} game={game} onChoose={choose} />
+                game.mode === 'host' ? (
+                  <HostDecisionPanel game={game} onSubmit={submitHostDecisions} />
+                ) : (
+                  <DecisionPanel activePlayer={activePlayer} game={game} onChoose={choose} />
+                )
+              ) : game.round.decisionPhase === 'revealed' ? (
+                game.mode === 'host' ? (
+                  <HostRevealPanel game={game} onEdit={editHostDecisions} onResolve={resolveTurn} />
+                ) : (
+                  <RevealPanel game={game} onResolve={resolveTurn} />
+                )
               ) : (
-                <RevealPanel game={game} onResolve={resolveTurn} />
+                <CardRevealPanel game={game} onConfirm={confirmDrawnCard} />
               )
             ) : (
               <RoundBreak game={game} onNextRound={nextRound} />
@@ -281,18 +472,11 @@ function App() {
 function HeroPanel() {
   return (
     <section className="hero-panel">
-      <div className="sun-disc" />
-      <div className="temple-stack" aria-hidden="true">
-        <div />
-        <div />
-        <div />
-        <div />
-      </div>
       <span className="eyebrow">Incan Gold / 印加寶藏</span>
-      <h1>入神廟，拎寶石，識走先係真醒目。</h1>
-      <p>
-        這是原創視覺的教學遊玩版：保留 press-your-luck 核心流程，適合課堂、社團或朋友聚會即場試玩。
-      </p>
+      <h1>
+        <span>入神廟，拎寶石</span>
+        <span>識走先係醒目</span>
+      </h1>
     </section>
   )
 }
@@ -302,11 +486,13 @@ function PrivacyHandoff({
   step,
   total,
   onReady,
+  onReset,
 }: {
   player: GameState['players'][number]
   step: number
   total: number
   onReady: () => void
+  onReset: () => void
 }) {
   return (
     <div className="privacy-overlay" role="dialog" aria-modal="true" aria-labelledby="privacy-title">
@@ -321,6 +507,93 @@ function PrivacyHandoff({
           <Eye size={20} />
           我係 {player.name}，準備好
         </button>
+        <button className="privacy-reset-button" type="button" onClick={onReset}>
+          <RotateCcw size={17} />
+          返回設定 / 新遊戲
+        </button>
+      </section>
+    </div>
+  )
+}
+
+function ScorePeekOverlay({
+  player,
+  revealed,
+  onReveal,
+  onClose,
+}: {
+  player: GameState['players'][number] | null
+  revealed: boolean
+  onReveal: () => void
+  onClose: () => void
+}) {
+  if (!player) return null
+
+  const artifactScore = player.artifacts.reduce((sum, value) => sum + value, 0)
+  const securedScore = player.banked + artifactScore
+
+  return (
+    <div className="privacy-overlay" role="dialog" aria-modal="true" aria-labelledby="score-peek-title">
+      <section className="privacy-card score-peek-card">
+        <div className="privacy-seal" style={{ background: player.color }}>
+          {revealed ? <Gem size={30} /> : <LockKeyhole size={30} />}
+        </div>
+        <span className="eyebrow">Private score check</span>
+        <h2 id="score-peek-title">
+          {revealed ? `${player.name} 的私人分數` : `請將裝置交給 ${player.name}`}
+        </h2>
+        {!revealed ? (
+          <>
+            <p>其他人請移開視線。只有玩家本人接過裝置後先好撳開，主持人都唔好扮忙偷望。</p>
+            <button className="primary-action" type="button" onClick={onReveal}>
+              <Eye size={20} />
+              我係 {player.name}，顯示分數
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="private-score-grid">
+              <span>營地寶石<strong>{player.banked}</strong></span>
+              <span>神器分數<strong>{artifactScore}</strong></span>
+              <span className="private-score-total">安全總分<strong>{securedScore}</strong></span>
+            </div>
+            <button className="primary-action" type="button" onClick={onClose}>
+              <EyeOff size={20} />
+              隱藏並交回主持人
+            </button>
+          </>
+        )}
+      </section>
+    </div>
+  )
+}
+
+function ConfirmResetDialog({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  return (
+    <div className="privacy-overlay" role="dialog" aria-modal="true" aria-labelledby="reset-title">
+      <section className="privacy-card reset-card">
+        <div className="privacy-seal reset-seal">
+          <RotateCcw size={30} />
+        </div>
+        <span className="eyebrow">Start over?</span>
+        <h2 id="reset-title">確定要開新遊戲？</h2>
+        <p>目前五輪進度、玩家分數同事件紀錄都會清除。呢粒掣唔係用嚟試手感。</p>
+        <div className="dialog-actions">
+          <button className="secondary-action" type="button" onClick={onCancel}>
+            <X size={19} />
+            返回遊戲
+          </button>
+          <button className="danger-action" type="button" onClick={onConfirm}>
+            <RotateCcw size={19} />
+            清除並開新遊戲
+          </button>
+        </div>
       </section>
     </div>
   )
@@ -424,6 +697,212 @@ function DecisionPanel({
   )
 }
 
+function HostDecisionPanel({
+  game,
+  onSubmit,
+}: {
+  game: GameState
+  onSubmit: (decisions: Record<string, Decision>) => void
+}) {
+  const activePlayers = game.round.decisionOrder
+    .map((playerId) => game.players.find((player) => player.id === playerId))
+    .filter((player): player is GameState['players'][number] => Boolean(player))
+  const hostPlayer = game.hostPlayerId
+    ? activePlayers.find((player) => player.id === game.hostPlayerId) ?? null
+    : null
+  const [draft, setDraft] = useState<Record<string, Decision>>(() => ({
+    ...game.round.pendingDecisions,
+  }))
+  const [hostLocked, setHostLocked] = useState(
+    () => !hostPlayer || Boolean(game.round.pendingDecisions[hostPlayer.id]),
+  )
+
+  const selectedCount = activePlayers.filter((player) => Boolean(draft[player.id])).length
+  const allComplete = selectedCount === activePlayers.length
+
+  function setDecision(playerId: string, decision: Decision) {
+    if (hostPlayer?.id === playerId && hostLocked) return
+    setDraft((current) => ({ ...current, [playerId]: decision }))
+  }
+
+  function setEveryoneContinue() {
+    setDraft((current) => ({
+      ...Object.fromEntries(activePlayers.map((player) => [player.id, 'continue' as Decision])),
+      ...(hostPlayer && hostLocked && current[hostPlayer.id]
+        ? { [hostPlayer.id]: current[hostPlayer.id] }
+        : {}),
+    }))
+  }
+
+  function clearChoices() {
+    setDraft(
+      hostPlayer && hostLocked && draft[hostPlayer.id]
+        ? { [hostPlayer.id]: draft[hostPlayer.id] }
+        : {},
+    )
+  }
+
+  if (hostPlayer && !hostLocked) {
+    const hostChoice = draft[hostPlayer.id]
+    return (
+      <section className="decision-panel host-decision-panel host-lock-panel">
+        <span className="eyebrow">Host plays first</span>
+        <h2>{hostPlayer.name}，先鎖定自己答案</h2>
+        <p>未睇其他玩家手勢之前先決定。鎖定後唔可以改，公平先有資格叫人唔好跟風。</p>
+        <div className="host-lock-choice">
+          <button
+            type="button"
+            className={hostChoice === 'continue' ? 'host-choice continue selected' : 'host-choice continue'}
+            onClick={() => setDecision(hostPlayer.id, 'continue')}
+          >
+            <Footprints size={22} />
+            繼續探索
+          </button>
+          <button
+            type="button"
+            className={hostChoice === 'leave' ? 'host-choice leave selected' : 'host-choice leave'}
+            onClick={() => setDecision(hostPlayer.id, 'leave')}
+          >
+            <DoorOpen size={22} />
+            回營入帳
+          </button>
+        </div>
+        <button
+          type="button"
+          className="primary-action"
+          disabled={!hostChoice}
+          onClick={() => setHostLocked(true)}
+        >
+          <LockKeyhole size={19} />
+          鎖定我的答案
+        </button>
+      </section>
+    )
+  }
+
+  return (
+    <section className="decision-panel host-decision-panel">
+      <div className="host-panel-heading">
+        <div>
+          <span className="eyebrow">Host vote recorder</span>
+          <h2>記錄全體決定</h2>
+        </div>
+        <strong className={allComplete ? 'vote-count complete' : 'vote-count'}>
+          {selectedCount} / {activePlayers.length}
+        </strong>
+      </div>
+      <div className="host-callout">
+        <ShieldCheck size={22} />
+        <p><b>主持人倒數 3、2、1。</b> 握拳繼續，手掌回營；所有人同時示意。</p>
+      </div>
+      <div className="host-vote-list">
+        {activePlayers.map((player) => {
+          const decision = draft[player.id]
+          const isLockedHost = hostPlayer?.id === player.id && hostLocked
+          return (
+            <article className="host-vote-row" key={player.id} style={{ borderColor: player.color }}>
+              <div className="host-vote-player">
+                <span className="mini-player-marker" style={{ background: player.color }}>
+                  <Tent size={16} />
+                </span>
+                <div>
+                  <strong>{player.name}</strong>
+                  {isLockedHost && <small><LockKeyhole size={12} /> 主持人答案已鎖定</small>}
+                </div>
+              </div>
+              <div className="host-vote-actions" aria-label={`${player.name} 的選擇`}>
+                <button
+                  type="button"
+                  className={decision === 'continue' ? 'vote-button continue selected' : 'vote-button continue'}
+                  onClick={() => setDecision(player.id, 'continue')}
+                  disabled={isLockedHost}
+                  aria-label={`${player.name} 繼續探索`}
+                >
+                  <Footprints size={18} />
+                  <span>繼續</span>
+                </button>
+                <button
+                  type="button"
+                  className={decision === 'leave' ? 'vote-button leave selected' : 'vote-button leave'}
+                  onClick={() => setDecision(player.id, 'leave')}
+                  disabled={isLockedHost}
+                  aria-label={`${player.name} 回營`}
+                >
+                  <DoorOpen size={18} />
+                  <span>回營</span>
+                </button>
+              </div>
+            </article>
+          )
+        })}
+      </div>
+      <div className="host-tools">
+        <button type="button" className="secondary-action" onClick={setEveryoneContinue}>
+          <Footprints size={18} />
+          全部繼續
+        </button>
+        <button type="button" className="secondary-action" onClick={clearChoices}>
+          <X size={18} />
+          清除選擇
+        </button>
+      </div>
+      <button
+        type="button"
+        className="primary-action"
+        disabled={!allComplete}
+        onClick={() => onSubmit(draft)}
+      >
+        <ClipboardCheck size={20} />
+        確認全體選擇
+      </button>
+      {!allComplete && <small className="form-hint">尚有 {activePlayers.length - selectedCount} 位玩家未記錄。</small>}
+    </section>
+  )
+}
+
+function HostRevealPanel({
+  game,
+  onEdit,
+  onResolve,
+}: {
+  game: GameState
+  onEdit: () => void
+  onResolve: () => void
+}) {
+  return (
+    <section className="decision-panel reveal host-review-panel">
+      <span className="eyebrow">Review before resolving</span>
+      <h2>確認投票紀錄</h2>
+      <p>{game.round.turnSummary}</p>
+      <div className="choice-reveal-list">
+        {game.round.decisionOrder.map((playerId) => {
+          const player = game.players.find((item) => item.id === playerId)
+          const decision = game.round.pendingDecisions[playerId]
+          return (
+            <div className={`choice-row decision-${decision}`} key={playerId}>
+              <span>{player?.name}</span>
+              <strong>
+                {decision === 'continue' ? <Footprints size={17} /> : <DoorOpen size={17} />}
+                {decision === 'continue' ? '繼續探索' : '回營入帳'}
+              </strong>
+            </div>
+          )
+        })}
+      </div>
+      <div className="review-actions">
+        <button type="button" className="secondary-action" onClick={onEdit}>
+          <Undo2 size={18} />
+          返回修改
+        </button>
+        <button type="button" className="primary-action" onClick={onResolve}>
+          <Gem size={20} />
+          確認並處理結果
+        </button>
+      </div>
+    </section>
+  )
+}
+
 function RevealPanel({ game, onResolve }: { game: GameState; onResolve: () => void }) {
   return (
     <section className="decision-panel reveal">
@@ -445,6 +924,34 @@ function RevealPanel({ game, onResolve }: { game: GameState; onResolve: () => vo
       <button type="button" className="primary-action" onClick={onResolve}>
         <Gem size={20} />
         處理結果 / 翻下一張牌
+      </button>
+    </section>
+  )
+}
+
+function CardRevealPanel({ game, onConfirm }: { game: GameState; onConfirm: () => void }) {
+  const card = game.round.path.at(-1)
+  if (!card) return null
+
+  const description =
+    card.kind === 'treasure'
+      ? `寶藏已分配，${card.gemsOnCard} 分留在路上。`
+      : card.kind === 'artifact'
+        ? `神器價值 ${card.value} 分，單獨回營嘅玩家先可以帶走。`
+        : `${HAZARD_LABELS[card.hazard]} 第一次出現；同類危機再出現就會爆煲。`
+
+  return (
+    <section className="decision-panel card-reveal-panel">
+      <span className="eyebrow">New card revealed</span>
+      <h2>全員確認新卡</h2>
+      <p>暫時未開始下一次秘密選擇。請所有玩家先睇清楚新卡同結算結果。</p>
+      <div className="card-reveal-content">
+        <CardTile card={card} pathIndex={game.round.path.length} isLatest />
+        <strong>{description}</strong>
+      </div>
+      <button type="button" className="primary-action" onClick={onConfirm}>
+        <CircleCheckBig size={20} />
+        大家已看清楚，開始下一次選擇
       </button>
     </section>
   )
@@ -574,11 +1081,38 @@ function loadGame(): GameState | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
-    return JSON.parse(raw) as GameState
+    return normalizeGame(JSON.parse(raw) as GameState)
   } catch {
     localStorage.removeItem(STORAGE_KEY)
     return null
   }
+}
+
+function loadUndoGame(): GameState | null {
+  try {
+    const raw = localStorage.getItem(UNDO_STORAGE_KEY)
+    if (!raw) return null
+    return normalizeGame(JSON.parse(raw) as GameState)
+  } catch {
+    localStorage.removeItem(UNDO_STORAGE_KEY)
+    return null
+  }
+}
+
+function normalizeGame(game: GameState): GameState {
+  return {
+    ...game,
+    mode: game.mode ?? 'hot-seat',
+    hostParticipates: game.hostParticipates ?? false,
+    hostPlayerId: game.hostPlayerId ?? null,
+  }
+}
+
+function createRandomSeed(): number {
+  if (typeof crypto !== 'undefined' && 'getRandomValues' in crypto) {
+    return crypto.getRandomValues(new Uint32Array(1))[0]
+  }
+  return Date.now() >>> 0
 }
 
 export default App

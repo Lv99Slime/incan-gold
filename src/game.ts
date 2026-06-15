@@ -1,4 +1,11 @@
 export type Decision = 'continue' | 'leave'
+export type GameMode = 'hot-seat' | 'host'
+
+export type GameOptions = {
+  mode?: GameMode
+  hostParticipates?: boolean
+  hostPlayerId?: string
+}
 
 export type HazardType = 'spider' | 'snake' | 'fire' | 'rocks' | 'spirit'
 
@@ -31,7 +38,7 @@ export type RoundState = {
   pendingDecisions: Record<string, Decision>
   decisionOrder: string[]
   currentDecisionIndex: number
-  decisionPhase: 'choosing' | 'revealed'
+  decisionPhase: 'choosing' | 'revealed' | 'card-revealed'
   turnSummary: string
   artifactsAvailable: number[]
   removedHazards: HazardType[]
@@ -41,6 +48,9 @@ export type GameState = {
   players: Player[]
   round: RoundState
   status: 'setup' | 'playing' | 'game-over'
+  mode: GameMode
+  hostParticipates: boolean
+  hostPlayerId: string | null
   seed: number
   log: LogEntry[]
 }
@@ -68,7 +78,11 @@ export const HAZARD_LABELS: Record<HazardType, string> = {
   spirit: '守墓幻影',
 }
 
-export function createGame(playerNames: string[], seed = Date.now()): GameState {
+export function createGame(
+  playerNames: string[],
+  seed = Date.now(),
+  options: GameOptions = {},
+): GameState {
   if (playerNames.length < 3 || playerNames.length > 8) {
     throw new Error('Incan Gold needs 3 to 8 players.')
   }
@@ -83,10 +97,20 @@ export function createGame(playerNames: string[], seed = Date.now()): GameState 
     inTemple: true,
   }))
 
+  const mode = options.mode ?? 'hot-seat'
+  const hostParticipates = mode === 'host' && Boolean(options.hostParticipates)
+  const hostPlayerId =
+    hostParticipates && players.some((player) => player.id === options.hostPlayerId)
+      ? options.hostPlayerId ?? null
+      : null
+
   return startRound({
     players,
     seed,
     status: 'playing',
+    mode,
+    hostParticipates,
+    hostPlayerId,
     round: emptyRound(0),
     log: [
       {
@@ -119,6 +143,59 @@ export function recordDecision(state: GameState, playerId: string, decision: Dec
   }
 }
 
+export function recordDecisions(
+  state: GameState,
+  decisions: Record<string, Decision>,
+): GameState {
+  if (state.status !== 'playing' || state.round.decisionPhase !== 'choosing') return state
+
+  const expectedIds = state.round.decisionOrder
+  const complete = expectedIds.every(
+    (playerId) => decisions[playerId] === 'continue' || decisions[playerId] === 'leave',
+  )
+  const containsUnexpectedPlayer = Object.keys(decisions).some(
+    (playerId) => !expectedIds.includes(playerId),
+  )
+
+  if (!complete || containsUnexpectedPlayer) return state
+
+  const pendingDecisions = Object.fromEntries(
+    expectedIds.map((playerId) => [playerId, decisions[playerId]]),
+  ) as Record<string, Decision>
+
+  return {
+    ...state,
+    round: {
+      ...state.round,
+      pendingDecisions,
+      currentDecisionIndex: expectedIds.length,
+      decisionPhase: 'revealed',
+      turnSummary: summarizeChoices(state.players, pendingDecisions),
+    },
+  }
+}
+
+export function reviseDecisions(state: GameState): GameState {
+  if (
+    state.status !== 'playing' ||
+    state.mode !== 'host' ||
+    state.round.decisionPhase !== 'revealed' ||
+    !state.round.active
+  ) {
+    return state
+  }
+
+  return {
+    ...state,
+    round: {
+      ...state.round,
+      currentDecisionIndex: 0,
+      decisionPhase: 'choosing',
+      turnSummary: '',
+    },
+  }
+}
+
 export function resolveRevealedTurn(state: GameState): GameState {
   if (state.status !== 'playing' || state.round.decisionPhase !== 'revealed') return state
 
@@ -136,7 +213,9 @@ export function resolveRevealedTurn(state: GameState): GameState {
 
   const drawn = nextState.round.deck[0]
   if (!drawn) {
-    nextState = endRound(nextState, '牌堆清空，神廟今日都算夠你哋玩。')
+    const returningIds = remaining.map((player) => player.id)
+    nextState = processLeavingPlayers(nextState, returningIds)
+    nextState = endRound(nextState, '牌堆清空，仍在神廟嘅玩家安全回營並完成入帳。')
     return nextState
   }
 
@@ -146,7 +225,7 @@ export function resolveRevealedTurn(state: GameState): GameState {
   }
 
   if (drawn.kind === 'artifact') {
-    return nextDecisionPhase(
+    return awaitCardAcknowledgement(
       addLog(
         {
           ...nextState,
@@ -181,6 +260,9 @@ export function startNextRound(state: GameState): GameState {
 }
 
 export function newDecisionPhase(state: GameState): GameState {
+  if (state.status !== 'playing' || state.round.decisionPhase !== 'card-revealed') {
+    return state
+  }
   return nextDecisionPhase(state)
 }
 
@@ -215,10 +297,16 @@ export function buildBaseDeck(removedHazards: HazardType[] = []): Card[] {
 function startRound(state: GameState): GameState {
   const roundNumber = state.round.number + 1
   const removedHazards = state.round.removedHazards ?? []
-  const artifact = ARTIFACT_VALUES[roundNumber - 1]
-  const artifactCards: Card[] = artifact
-    ? [{ id: `a${roundNumber}-${artifact}`, kind: 'artifact', value: artifact }]
-    : []
+  const newArtifact = ARTIFACT_VALUES[roundNumber - 1]
+  const artifactsAvailable = [
+    ...(state.round.artifactsAvailable ?? []),
+    ...(newArtifact ? [newArtifact] : []),
+  ]
+  const artifactCards: Card[] = artifactsAvailable.map((value, index) => ({
+    id: `a${roundNumber}-${index}-${value}`,
+    kind: 'artifact',
+    value,
+  }))
   const seed = advanceSeed(state.seed)
   const deck = shuffle([...buildBaseDeck(removedHazards), ...artifactCards], seed)
   const players = state.players.map((player) => ({
@@ -241,7 +329,7 @@ function startRound(state: GameState): GameState {
       currentDecisionIndex: 0,
       decisionPhase: 'choosing',
       turnSummary: '',
-      artifactsAvailable: artifact ? [artifact] : [],
+      artifactsAvailable,
       removedHazards,
     },
     log: [
@@ -283,6 +371,19 @@ function nextDecisionPhase(state: GameState): GameState {
       currentDecisionIndex: 0,
       decisionPhase: 'choosing',
       turnSummary: '',
+    },
+  }
+}
+
+function awaitCardAcknowledgement(state: GameState): GameState {
+  return {
+    ...state,
+    round: {
+      ...state.round,
+      pendingDecisions: {},
+      decisionOrder: [],
+      currentDecisionIndex: 0,
+      decisionPhase: 'card-revealed',
     },
   }
 }
@@ -334,10 +435,9 @@ function processLeavingPlayers(state: GameState, leavingIds: string[]): GameStat
       round: {
         ...state.round,
         path,
-        artifactsAvailable:
-          singleLeaver && artifactsOnPath.length > 0
-            ? []
-            : state.round.artifactsAvailable,
+        artifactsAvailable: singleLeaver
+          ? removeArtifactValues(state.round.artifactsAvailable, artifactsOnPath)
+          : state.round.artifactsAvailable,
       },
     },
     '有人回營',
@@ -354,7 +454,7 @@ function handleTreasure(state: GameState, card: Extract<Card, { kind: 'treasure'
   )
   const drawn = { ...card, gemsOnCard: remainder }
 
-  return nextDecisionPhase(
+  return awaitCardAcknowledgement(
     addLog(
       {
         ...state,
@@ -378,7 +478,7 @@ function handleHazard(state: GameState, card: Extract<Card, { kind: 'hazard' }>,
   const path = [...state.round.path, card]
 
   if (sameHazards.length === 0) {
-    return nextDecisionPhase(
+    return awaitCardAcknowledgement(
       addLog(
         {
           ...state,
@@ -419,6 +519,10 @@ function handleHazard(state: GameState, card: Extract<Card, { kind: 'hazard' }>,
 
 function endRound(state: GameState, reason: string): GameState {
   const keptPath = state.round.path.filter((card) => card.kind !== 'artifact')
+  const undrawnArtifacts = state.round.deck
+    .filter((card): card is Extract<Card, { kind: 'artifact' }> => card.kind === 'artifact')
+    .map((card) => card.value)
+
   return addLog(
     {
       ...state,
@@ -432,6 +536,7 @@ function endRound(state: GameState, reason: string): GameState {
         currentDecisionIndex: 0,
         decisionPhase: 'revealed',
         turnSummary: reason,
+        artifactsAvailable: undrawnArtifacts,
       },
     },
     '回合結束',
@@ -477,18 +582,39 @@ function playerName(state: GameState, playerId: string): string {
 }
 
 function advanceSeed(seed: number): number {
-  return (seed * 1664525 + 1013904223) >>> 0
+  return (seed + 0x6d2b79f5) >>> 0
 }
 
 function shuffle<T>(items: T[], seed: number): T[] {
   const shuffled = [...items]
   let currentSeed = seed
   for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    currentSeed = advanceSeed(currentSeed)
-    const swapIndex = currentSeed % (index + 1)
+    const random = nextRandom(currentSeed)
+    currentSeed = random.seed
+    const swapIndex = Math.floor(random.value * (index + 1))
     const temp = shuffled[index]
     shuffled[index] = shuffled[swapIndex]
     shuffled[swapIndex] = temp
   }
   return shuffled
+}
+
+function nextRandom(seed: number): { seed: number; value: number } {
+  const nextSeed = advanceSeed(seed)
+  let value = nextSeed
+  value = Math.imul(value ^ (value >>> 15), value | 1)
+  value ^= value + Math.imul(value ^ (value >>> 7), value | 61)
+  return {
+    seed: nextSeed,
+    value: ((value ^ (value >>> 14)) >>> 0) / 4294967296,
+  }
+}
+
+function removeArtifactValues(available: number[], claimed: number[]): number[] {
+  const remaining = [...available]
+  claimed.forEach((value) => {
+    const index = remaining.indexOf(value)
+    if (index >= 0) remaining.splice(index, 1)
+  })
+  return remaining
 }
